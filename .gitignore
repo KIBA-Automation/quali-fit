@@ -1,0 +1,17 @@
+# 실데이터·백업은 절대 커밋하지 않는다 (PII/회사 기밀 — DATA_DIR 밖에서 관리)
+Data/*.csv
+Data/*.xlsx
+Data/backups/
+!Data/.gitkeep
+
+# 파이썬/환경
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 도구·OS 산출물
+.playwright-mcp/
+*.png
+.DS_Store
+/tmp/
