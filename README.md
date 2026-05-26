@@ -1,74 +1,97 @@
-# Explainable Staffing Recommender — 원가용역 인력 추천
+# quali-fit — Explainable Staffing Recommender
 
-스킬·자격 데이터로 **특정 업무에 적합한 직원을 설명 가능한 점수와 함께 추천**하는 사내
-웹 도구. 한 원가/원가검증 컨설팅 조직의 실제 운영 도구로 출발했고, 멀티테넌트 SaaS로
-확장하는 것을 목표로 한다. (이 저장소는 일반화·합성데이터 버전 — 실데이터·실조직명 미포함)
+An internal web tool that, given a work code, recommends the best-fit employees
+**with the reason for each match shown next to the score**. It started as a real
+in-house tool for a cost-engineering consultancy and is being grown into a
+multi-tenant SaaS. This repo is the **generalized, synthetic-data version** — no
+real data or real organization names are included.
 
-> **AI 협업 명시**: 코드는 AI 에이전트와 함께 작성했다. 나의 기여는 문제 정의, 데이터
-> 모델·점수 설계, 트레이드오프 결정, 리뷰와 궤도 수정이다. 이 README와 `docs/adr/`가
-> 그 "고민의 흔적"이며 이 프로젝트의 핵심 산출물이다.
+**Status: active learning rebuild.** The app is being rewritten from scratch
+("hello world" upward) by hand, one small phase per version, to study every
+layer. See the [open issues](../../issues) for the live phase checklist.
+Current target stack: **Streamlit + SQLite + layered Python** (db / domain / UI).
 
-## 문제 & 맥락
+> **AI collaboration, stated up front.** The code is written together with an AI
+> agent. My contribution is problem framing, data-model and scoring design,
+> trade-off decisions, review, and course corrections. This README, the issues,
+> and `docs/adr/` (planned) are the real artifacts — the *trace of judgment*, not
+> the raw lines.
 
-프로젝트 입찰 시 "이 업무를 이런 직원들로 수행하겠다"를 근거와 함께 제시해야 한다.
-기존엔 수작업. 입력 데이터(직원·학력·자격증·업무코드)는 비정형 CSV였다. 목표:
-**업무코드를 고르면 보유 자격 기반으로 적합 직원을 점수순으로, 왜 그 사람인지 근거와
-함께** 보여주는 읽기 쉬운 내부 도구.
+## Problem & context
 
-## 무엇을 하는가
+When the firm bids on a project, the proposal must say "we will staff this work
+with these people" — with evidence. That was manual. The input data (employees,
+education, certifications, work codes) lived in messy CSV files. The goal: pick
+a work code and get a ranked list of suitable employees, with a short, readable
+**reason per person** (which certificates contributed, with what weight).
 
-- 정규화된 6개 데이터(직원 / 학력 / 직원-자격증 / 자격증 마스터 / 업무코드 마스터 /
-  업무코드↔자격증 매핑)를 사내 누구나 검증과 함께 편집.
-- 업무코드 선택 → 매핑 테이블의 **업무관련영향력(1~5)** 으로 직원 점수 산정 →
-  순위 + 1인당 근거(어떤 자격증이 왜 기여했는지) 제시.
-- 원자적 CSV 저장 + 타임스탬프 백업, URL 쿼리파라미터로 새로고침 상태 보존.
+## What it does
 
-## 기술 스택 (현재)
+- Manages six normalized tables (employees, education, employee↔cert,
+  cert master, work-code master, work-code↔cert mapping) with validation and
+  safe writes; anyone in the org can edit.
+- For a chosen work code, joins the mapping table to find qualifying certs,
+  sums per-cert influence (1–5), and produces a ranked employee list **with the
+  rationale row-by-row**.
+- Uses URL query parameters so a browser refresh keeps you on the same screen.
 
-| 계층 | 구성 |
+## Stack (target, in progress)
+
+| Layer | Choice |
 |---|---|
-| UI/서버 | Streamlit (Python 단일 프로세스, 별도 프론트엔드 없음) |
-| 로직 | `scoring.py`(점수, 순수) · `validation.py`(검증, 순수) · `data_loader.py` · `persistence.py`(원자적 저장+백업) |
-| 데이터 | `Data/`의 정규화 CSV 6개 + `Data/backups/` |
-| 런타임 | Python 3.13 venv, `streamlit run app.py` |
+| UI / server | Streamlit (single Python process; no separate front-end) |
+| Domain | Pure Python modules (scoring, validation) — no Streamlit imports |
+| Storage | SQLite (one file per database; WAL mode; foreign keys enforced) |
+| Runtime | Python 3.13 venv, `streamlit run app.py` |
 
-데이터 접근이 `data_loader`/`persistence`에 격리돼 있어 저장소 교체(예: SQLite)가
-국소적이다 — 이것이 아래 로드맵의 전제.
+The point of the layering is portability: the same `db` and domain code can
+later sit behind FastAPI or another front-end with no rewrite.
 
-## 핵심 엔지니어링 결정 (요약 · 상세는 `docs/adr/` 예정)
+## Key engineering decisions (planned ADRs in `docs/adr/`)
 
-- **자연키 → 대리키 → 정규화**: 초기 `(이름,소속,직책)` 자연키 → `직원번호` 대리키 →
-  매칭 정보를 별도 조인 테이블(`업무코드_자격증_매핑`)로 정규화(이중 저장 제거, 단일 소스).
-- **설명 가능한 점수 모델**: 점수 ≠ 블랙박스. 자격증 1건 기여 = 영향력×가중치
-  (만료 감산), 총점 = 최고 기여 + 다양성 보너스(상한). 1인당 근거를 표로 노출.
-- **의도적 트레이드오프**: 현재 저장소는 CSV — 소규모·저동시성·백업 용이성 때문.
-  관계형으로 성숙했으므로 다음 단계는 SQLite(아래). 동시 편집은 라스트-라이트-윈 +
-  백업으로 완화(한계를 UI에 명시).
-- **실수 → 회복**: 마이그레이션 중 학력 3행 손실을 발견하고 원본 백업에서 복구,
-  재발 방지 지침을 문서화.
+- **Surrogate keys, single source of truth.** Natural keys like `(name, dept,
+  title)` were replaced by `employee_id`. The cert↔work-code mapping lives in
+  one join table — not duplicated in the cert master.
+- **Explainable scoring, not a black box.** Each contributing cert is shown
+  with its influence level (1–5), its mapping rationale, and an expiry-adjusted
+  contribution. Total = best contribution + diversity bonus (capped).
+- **Deliberate trade-offs.** SQLite is right-sized for a small org and one or
+  two tenants; Postgres would be over-engineering today. The plan documents the
+  trigger for each next step (e.g., multi-tenant → SQLite-per-tenant → auth).
+- **Mistakes and recovery.** A past migration accidentally lost three rows;
+  they were restored from the timestamped backup, and the lesson became a
+  guardrail in the code.
 
-## 로드맵 (계획)
+## Roadmap
 
-1. **인증 추가**: 회사 계정 로그인(데모는 로컬 인증, 운영은 OIDC `st.login`).
-2. **멀티테넌트 SaaS화**:
-   - 테넌트당 분리 저장(`data/tenants/<id>/`, 향후 테넌트당 SQLite 파일).
-   - 격리 불변식: 테넌트는 **인증 세션에서만** 도출, `data_loader`만 경로를 안다
-     (쿼리파라미터/클라이언트 입력으로 테넌트 결정 금지).
-   - 테넌트별 `config.yaml`(표시명·로고·활성 서비스·점수 가중치) — 코드 분기 없는 커스터마이즈.
-   - 공개 데모 테넌트 1~2개를 **합성데이터**로 동봉 → 실데이터 없이 SaaS 체험 가능.
-3. **CSV → SQLite-per-tenant**: 멀티테넌트가 트리거. ACID·동시쓰기 안전, 백업은 여전히
-   파일 1개 복사. `data_loader`/`persistence`만 교체.
-4. **의도적 범위 제외**(현 단계): 과금·셀프 회원가입·테넌트 자동프로비저닝·RBAC·감사로그.
-   필요 시점 전까지 만들지 않음 — 범위 통제도 설계의 일부.
+1. **v0.0.1 – v0.1.0 — hand-rebuild to feature parity** (current path):
+   hello-world → SQLite schema + CSV seed → read-only views → CRUD → validation
+   → derived/dropdown UX → scoring → safe writes + backup → docs and parity.
+2. **v0.2.x — authentication.** Local accounts for the demo; OIDC (`st.login`)
+   for production. Auth boundary in its own module.
+3. **v0.3.x — multi-tenant SaaS.** One SQLite file per tenant under
+   `data/tenants/<id>/`. **Tenant is derived from the authenticated session
+   only** (never from a query parameter or client input). Per-tenant
+   `config.yaml` for display and weights. A synthetic demo tenant ships with
+   the repo so reviewers can log in and try it.
+4. **v0.4.x — FastAPI in front.** Add a REST API in front of the same `db` and
+   domain code. The UI stays separate.
 
-## 데이터·프라이버시 원칙 (공개 저장소)
+Out of scope for now (on purpose): billing, self-serve signup, automatic
+tenant provisioning, RBAC, audit logs. Scope control is part of the design.
 
-- **실데이터·실조직명·실명은 저장소·히스토리에 절대 포함하지 않는다.** 부분 익명화가
-  아니라 **합성 데이터로 완전 재생성**(소규모 + 다속성은 재식별 가능).
-- 실데이터는 git 밖(`DATA_DIR`로 분리), 커밋엔 합성 샘플/생성 스크립트만.
-- 정제는 "이벤트"가 아니라 구조 — 데이터가 애초에 레포에 들어오지 않게 한다.
+## Data and privacy (public repo)
 
-## 실행 (현재)
+- **No real data, no real names, no real organization, ever — not now, not in
+  history.** Anonymizing 40 employees with rich attributes is not safe (small
+  size + many attributes = re-identifiable). The repo will ship a synthetic
+  data generator instead.
+- Real data lives outside the repo (a separate `DATA_DIR`). Only synthetic
+  samples and the generator get committed.
+- Cleanliness is structural, not a chore: real data never enters the repo, so
+  there is nothing to scrub.
+
+## Run (current)
 
 ```bash
 python3.13 -m venv .venv
@@ -76,11 +99,14 @@ python3.13 -m venv .venv
 .venv/bin/streamlit run app.py
 ```
 
-> 합성데이터 생성기(`scripts/gen_synthetic_data.py`)와 데모 테넌트는 로드맵 항목 —
-> 현재 저장소는 단일 테넌트·CSV·인증 없음 상태를 정확히 반영한다.
+Right now `app.py` is intentionally a "hello world" — the rebuild is in
+progress. A working app with the SQLite layer and real (synthetic) data will
+arrive over the next phases listed in the issues.
 
-## 작업 방식 (포트폴리오 의도)
+## How this is built (portfolio intent)
 
-혼자 진행하더라도 **결정마다 GitHub Issue(맥락+선택지+택한 것+이유) → 브랜치 →
-PR(셀프 리뷰: 리스크·버린 대안·검증) → 의미 단위 머지**, 굵직한 분기는 `docs/adr/`.
-커밋 수가 아니라 **말로 설명 가능한 판단의 궤적**이 목표.
+Even solo, the work is run through real artifacts: **one GitHub issue per
+decision (context, options chosen, reason) → branch → PR with a self-review
+(risks, rejected alternatives, verification) → meaningful merge**. Major forks
+get an ADR in `docs/adr/`. The point is not commit count — it is a trace of
+judgment that can be explained out loud.
