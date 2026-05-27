@@ -1,5 +1,6 @@
 import streamlit as st
 import db
+import validation
 
 st.set_page_config(page_title="quali-fit", layout="wide")
 
@@ -30,13 +31,20 @@ if choice:
         )
         if st.button("Save"):
             diff = st.session_state["employee_editor"]
-            try:
-                db.save_employee_diff(df, diff)
-                st.toast("Saved. ", icon="✅")
-                del st.session_state["employee_editor"]  # Clear diff after successful save
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error saving changes: {e}", icon="❌")
+            errors, warnings = validation.validate_employee_diff(df, diff)
+            for msg in warnings:
+                st.warning(msg)
+            if errors:
+                for msg in errors:
+                    st.error(msg)
+            else:
+                try:
+                    db.save_employee_diff(df, diff)
+                    st.toast("Saved. ", icon="✅")
+                    del st.session_state["employee_editor"]  # Clear diff after successful save
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error saving changes: {e}", icon="❌")
 
     else:
         st.dataframe(df, width = "stretch", hide_index = True)
