@@ -128,44 +128,164 @@ CREATE TABLE IF NOT EXISTS work_code_cert_map (
 
 KNOWN_TABLES = [t for _, t, _ in SEED_PLAN]
 
+# When showing a table that has an FK to one of these parents,
+# also display these parent columns alongside (read-only).
+DERIVED_LABELS = {
+    "employee":         ["name"],
+    "cert_master":      ["cert_name"],
+    "work_code_master": ["l1", "l2", "l3"],
+}
+
+# Tables whose PK should be auto-generated on INSERT if left blank.
+# The PK column is hidden from `required_cols` so validation won't flag it.
+AUTO_ID_RULES = {
+    "education": {"col": "education_id", "prefix": "EDU-"},
+}
+
+
+def _next_id(conn: sqlite3.Connection, table: str, pk_col: str, prefix: str) -> str:
+    """Return the next available '{prefix}NNN' value for `pk_col` in `table`."""
+    rows = conn.execute(
+        f"SELECT {pk_col} FROM {table} WHERE {pk_col} LIKE ?",
+        (f"{prefix}%",),
+    ).fetchall()
+    nums = []
+    for r in rows:
+        tail = r[pk_col][len(prefix):]
+        if tail.isdigit():
+            nums.append(int(tail))
+    return f"{prefix}{(max(nums, default=0) + 1):03d}"
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to re-run."""
     with connect() as conn:
         conn.executescript(SCHEMA)
 
-def save_employee_diff(original_df: pd.DataFrame, diff: dict) -> None:
-    """Apply st.data_editor diff (edited / added / deleted ) in one transaction."""
-    with connect() as conn:
-        # Deletions: row idx -> look up employee_id in the original snapshot
-        for idx in diff.get("deleted_rows", []):
-            emp_id = original_df.iloc[idx]["employee_id"]
-            conn.execute("DELETE FROM employee WHERE employee_id = ?", (emp_id,))
+def fk_options(table: str) -> dict[str, list]:
+    """For each FK column on this table, return the valid parent-PK values.
+    Returns {child_col: [parent_pk_value, ...]}; empty dict if no FKs.
 
-        # Edits: {idx: {col: new_value, ...}}
-        for idx, changes in diff.get("edited_rows", {}).items():
-            emp_id = original_df.iloc[idx]["employee_id"]
-            cols = list(changes.keys())
-            values = list(changes.values())
-            set_clause = ", ".join(f"{c} = ?" for c in cols)
-            conn.execute(
-                f"UPDATE employee SET {set_clause} WHERE employee_id = ?",
-                (*values, emp_id),
-            )
-
-        # Additions: list of {col: value, ...}
-        for row in diff.get("added_rows", []):
-            conn.execute(
-                "INSERT INTO employee (employee_id, name, dept, title) VALUES (?, ?, ?, ?)",
-                (row.get("employee_id", ""), row.get("name", ""),
-                row.get("dept", ""), row.get("title", "")),
-            )
-
-def fetch_all(table: str) -> pd.DataFrame:
-    """Return entire table as a DataFrame. Read-only helper for the UI layer."""
+    Used by the UI to render FK columns as dropdowns instead of free text."""
     if table not in KNOWN_TABLES:
         raise ValueError(f"Unknown table: {table}")
     with connect() as conn:
-        return pd.read_sql_query(f"SELECT * FROM {table}", conn)
+        fks = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+        options: dict[str, list] = {}
+        for fk in fks:
+            child_col = fk["from"]
+            parent_table = fk["table"]
+            parent_col = fk["to"]
+            rows = conn.execute(
+                f"SELECT {parent_col} FROM {parent_table} ORDER BY {parent_col}"
+            ).fetchall()
+            options[child_col] = [r[parent_col] for r in rows]
+    return options
+
+
+def table_meta(table: str) -> dict:
+    """Return schema metadata used by validation.
+
+    Includes:
+    - pk_cols:       primary-key columns (in order), single or composite
+    - required_cols: columns that must have a value when present in the diff
+                     (NOT NULL columns + PK columns — SQLite reports PK as
+                     notnull=0 for TEXT PKs, so we union them explicitly)
+    """
+    if table not in KNOWN_TABLES:
+        raise ValueError(f"Unknown table: {table}")
+    with connect() as conn:
+        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    auto_id_cols: set[str] = set()
+    if table in AUTO_ID_RULES:
+        auto_id_cols.add(AUTO_ID_RULES[table]["col"])
+    return {
+        "pk_cols":       [r["name"] for r in info if r["pk"] > 0],
+        "required_cols": [
+            r["name"] for r in info
+            if (r["notnull"] or r["pk"] > 0) and r["name"] not in auto_id_cols
+        ],
+        "all_cols":      [r["name"] for r in info],
+        "auto_id_cols":  sorted(auto_id_cols),
+    }
+
+
+def save_diff(table: str, original_df: pd.DataFrame, diff: dict) -> None:
+    """Apply data_editor diff (deleted / edited / added) to any
+    known table in a single transaction. PK columns are discovered
+    at runtime via PRAGMA table_info, so single and composite PKs are handled uniformly."""
+    if table not in KNOWN_TABLES:
+        raise ValueError(f"Unknown table: {table}")
+    
+    with connect() as conn:
+        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        pk_cols = [r["name"] for r in info if r["pk"] > 0]
+        all_cols = {r["name"] for r in info}
+        if not pk_cols:
+            raise RuntimeError(f"Table {table} has no primary key")
+        where_clause = " AND ".join(f"{c} = ?" for c in pk_cols)
+
+        # ---- DELETE ----
+        for idx in diff.get("deleted_rows", []):
+            pk_values = tuple(original_df.iloc[idx][c] for c in pk_cols)
+            conn.execute(f"DELETE FROM {table} WHERE {where_clause}", pk_values)
+
+        # ---- UPDATE ----
+        for idx, changes in diff.get("edited_rows", {}).items():
+            real_changes = {k: v for k, v in changes.items() if k in all_cols}
+            if not real_changes:
+                continue
+            pk_values = tuple(original_df.iloc[idx][c] for c in pk_cols)
+            cols = list(real_changes.keys())
+            values = list(real_changes.values())
+            set_clause = ", ".join(f"{c} = ?" for c in cols)
+            conn.execute(
+                f"UPDATE {table} SET {set_clause} WHERE {where_clause}",
+                (*values, *pk_values),
+            )
+
+        # ---- INSERT ----
+        rule = AUTO_ID_RULES.get(table)
+        for row in diff.get("added_rows", []):
+            real_row = {k: v for k, v in row.items() if k in all_cols}
+            if rule and not real_row.get(rule["col"]):
+                real_row[rule["col"]] = _next_id(conn, table, rule["col"], rule["prefix"])
+            cols = list(real_row.keys())
+            if not cols:
+                continue
+            col_list = ", ".join(cols)
+            placeholders = ", ".join(["?"] * len(cols))
+            conn.execute(
+                f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})",
+                tuple(real_row[c] for c in cols),
+            )
+
+def fetch_all(table: str) -> pd.DataFrame:
+    """Return table as a DataFrame, with each FK column followed by its
+    parent-derived label columns (LEFT JOIN). Derived columns are
+    read-only and exist purely for display."""
+    if table not in KNOWN_TABLES:
+        raise ValueError(f"Unknown table: {table}")
+    with connect() as conn:
+        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        fks = conn.execute(f"PRAGMA foreign_key_list({table})").fetchall()
+        fk_by_col = {fk["from"]: fk for fk in fks}
+
+        select_parts: list[str] = []
+        for col_info in info:
+            col = col_info["name"]
+            select_parts.append(f"{table}.{col}")
+            fk = fk_by_col.get(col)
+            if fk:
+                for label in DERIVED_LABELS.get(fk["table"], []):
+                    select_parts.append(f"{fk['table']}.{label}")
+
+        join_parts = [
+            f"LEFT JOIN {fk['table']} ON {table}.{fk['from']} = {fk['table']}.{fk['to']}"
+            for fk in fks
+        ]
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {table} {' '.join(join_parts)}"
+        return pd.read_sql_query(sql, conn)
 
 def seed_from_csv() -> None:
     """Reload tables from CSV files in Data/. Idempotent (wipe + reload)."""

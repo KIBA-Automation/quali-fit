@@ -11,7 +11,7 @@ if url_choice not in db.KNOWN_TABLES:
 choice = st.segmented_control(
     "Service",
     db.KNOWN_TABLES,
-    default = url_choice,
+    default=url_choice,
     label_visibility="collapsed",
 )
 
@@ -21,30 +21,45 @@ if choice and choice != st.query_params.get("svc"):
 if choice:
     st.subheader(choice)
     df = db.fetch_all(choice)
-    if choice == "employee":
-        st.data_editor(
-            df,
-            num_rows = "dynamic",
-            width = "stretch",
-            hide_index = True,
-            key = "employee_editor",
-        )
-        if st.button("Save"):
-            diff = st.session_state["employee_editor"]
-            errors, warnings = validation.validate_employee_diff(df, diff)
-            for msg in warnings:
-                st.warning(msg)
-            if errors:
-                for msg in errors:
-                    st.error(msg)
-            else:
-                try:
-                    db.save_employee_diff(df, diff)
-                    st.toast("Saved. ", icon="✅")
-                    del st.session_state["employee_editor"]  # Clear diff after successful save
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Error saving changes: {e}", icon="❌")
+    editor_key = f"{choice}_editor"
+    meta = db.table_meta(choice)
+    fk_opts = db.fk_options(choice)
+    column_config = {
+        col: st.column_config.SelectboxColumn(col, options=opts, required=True)
+        for col, opts in fk_opts.items()
+    }
+    # Derived columns (from LEFT JOINs in fetch_all) — read-only display.
+    real_cols = set(meta["all_cols"])
+    for c in df.columns:
+        if c not in real_cols:
+            column_config[c] = st.column_config.TextColumn(c, disabled=True)
+    # Auto-generated ID columns — show but lock the cell.
+    for c in meta["auto_id_cols"]:
+        column_config[c] = st.column_config.TextColumn(c, disabled=True, help="auto-generated on save")
 
-    else:
-        st.dataframe(df, width = "stretch", hide_index = True)
+    st.data_editor(
+        df,
+        num_rows="dynamic",
+        width="stretch",
+        hide_index=True,
+        key=editor_key,
+        column_config=column_config,
+    )
+
+    if st.button("Save"):
+        diff = st.session_state[editor_key]
+        meta = db.table_meta(choice)
+        errors, warnings = validation.validate_diff(meta, df, diff)
+        for msg in warnings:
+            st.warning(msg)
+        if errors:
+            for msg in errors:
+                st.error(msg)
+        else:
+            try:
+                db.save_diff(choice, df, diff)
+                st.toast("Saved.", icon="✅")
+                del st.session_state[editor_key]
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error saving changes: {e}", icon="❌")
