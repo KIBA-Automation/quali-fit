@@ -30,7 +30,7 @@ CATEGORIES = {
 }
 CATEGORY_LABELS = {
     "employee_group": "직원",
-    "work_group":     "업무",
+    "work_group":     "업무분류",
     "cert_group":     "한국 자격증 목록",
 }
 
