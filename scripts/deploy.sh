@@ -15,8 +15,14 @@ IMAGE="quali-fit:${IMAGE_TAG}"
 # 1) Build the image locally on the server (ARM64).
 sudo docker build -t "$IMAGE" .
 
-# 2) Import into k3s's containerd so the kubelet can find it without a registry.
+# 2) Import into k3s's containerd so the kubelet can find it without a registry,
+#    then drop the docker-side copy. The pod runs from containerd, so keeping the
+#    image in docker too just doubles disk use every deploy — that unbounded
+#    growth is what tripped the node's disk-pressure eviction and blocked a
+#    rollout. Removing it here keeps docker's store flat across deploys.
 sudo docker save "$IMAGE" | sudo k3s ctr images import -
+sudo docker image rm "$IMAGE" >/dev/null 2>&1 || true
+sudo docker builder prune -f >/dev/null 2>&1 || true
 
 # 3) Create namespace + manifests (everything in `quali-fit`).
 sudo kubectl apply -f k8s/00-namespace.yaml
@@ -47,6 +53,13 @@ done
 # 6) Wait for the pod to be ready (init_db runs at startup, schema only — no data).
 sudo kubectl -n quali-fit rollout status deployment/quali-fit --timeout=180s
 
+# 7) Now that the new pod is live, drop superseded quali-fit images from
+#    containerd (the old pod no longer needs them). Done last, never before the
+#    rollout, so we don't pull the image out from under the running pod.
+sudo k3s ctr images ls -q 2>/dev/null \
+  | grep '/quali-fit:' | grep -v ":${IMAGE_TAG}$" \
+  | xargs -r sudo k3s ctr images rm >/dev/null 2>&1 || true
+
 echo
-echo "Pod is up with empty schema. Now load the real data:"
-echo "  ./scripts/copy-db.sh"
+echo "Pod is up. Data persists on the PVC (init_db is schema-only). First-time"
+echo "setup only — load the real data with:  ./scripts/copy-db.sh"
