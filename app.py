@@ -14,12 +14,16 @@ def _l1_letter(l1: str) -> str:
     return m.group(1) if m else l1
 
 
+REPO_URL = "https://github.com/bookseal/quali-fit"
+
+
 def _build_info() -> str:
-    """One-line build stamp for the sidebar footer.
+    """One-line build stamp (markdown) for the sidebar footer.
 
     Lets anyone confirm at a glance which build is live (i.e. that a deploy
     actually shipped). Values are injected as env vars at image build time
     (see Dockerfile / deploy.sh); locally they fall back to the VERSION file.
+    The version links to its git tag and the commit links to its GitHub page.
     """
     version = (os.environ.get("APP_VERSION") or "").strip()
     if not version:
@@ -27,9 +31,22 @@ def _build_info() -> str:
             version = (Path(__file__).parent / "VERSION").read_text().strip()
         except OSError:
             version = "dev"
-    sha = (os.environ.get("GIT_SHA") or "local").strip()[:12]
+    sha = (os.environ.get("GIT_SHA") or "").strip()
     built = (os.environ.get("BUILD_TIME") or "").strip()
-    parts = [f"v{version}", f"`{sha}`"]
+
+    # Version -> tag page (skip the link for local/dev where no tag exists).
+    if version and version != "dev":
+        parts = [f"[v{version}]({REPO_URL}/tree/v{version})"]
+    else:
+        parts = [f"v{version}"]
+
+    # Commit -> GitHub commit page, but only when it's a real git SHA
+    # (manual/local tags like "manual-…" or "local" stay plain text).
+    if re.fullmatch(r"[0-9a-f]{7,40}", sha):
+        parts.append(f"[`{sha[:12]}`]({REPO_URL}/commit/{sha})")
+    else:
+        parts.append(f"`{sha[:12] or 'local'}`")
+
     if built:
         parts.append(built)
     return " · ".join(parts)
