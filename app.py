@@ -1,9 +1,11 @@
 import os
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 import db
 import validation
 import scoring
+from print_view import build_mapping_print_html
 from datetime import date
 from pathlib import Path
 
@@ -250,61 +252,83 @@ if mode == "manage":
         display_matrix = matrix.copy()
         display_matrix["l1"] = display_matrix["l1"].apply(_l1_letter)
 
-        info_cols = ["work_code", "l1", "l2", "l3", "task_type"]
-        column_config = {
-            "work_code": st.column_config.TextColumn(
-                "업무분류코드", disabled=True, pinned=True,
-            ),
-            "l1": st.column_config.TextColumn(
-                "대", disabled=True, pinned=True, width="small",
-            ),
-            "l2": st.column_config.TextColumn(
-                "중분류", disabled=True, pinned=True, width="small",
-            ),
-            "l3": st.column_config.TextColumn(
-                "소분류", disabled=True, pinned=True, width="small",
-            ),
-            "task_type": st.column_config.TextColumn(
-                "산정/검증", disabled=True, pinned=True, width="small",
-            ),
-        }
-        for cert_code in display_matrix.columns[5:]:
-            meta = cert_meta.get(cert_code, {})
-            name = meta.get("cert_name", cert_code)
-            holders = meta.get("holder_count", 0)
-            column_config[cert_code] = st.column_config.NumberColumn(
-                f"{name} ({holders}명)",
-                help=cert_code,
-                min_value=1, max_value=5, step=1,
-            )
-
-        editor_key = f"matrix_ccat_{bucket}"
-        edited = st.data_editor(
-            display_matrix,
-            num_rows="fixed",
-            width="stretch",
-            hide_index=True,
-            key=editor_key,
-            column_config=column_config,
-            disabled=info_cols,
+        view_mode = st.segmented_control(
+            "보기 방식",
+            ["edit", "print"],
+            default="edit",
+            format_func=lambda value: {
+                "edit": "편집",
+                "print": "인쇄 미리보기",
+            }[value],
         )
 
-        if st.button("이 분류 저장", type="primary"):
-            try:
-                result = db.save_mapping_matrix_diff(
-                    display_matrix, edited, row_axis="work_code",
+        info_cols = ["work_code", "l1", "l2", "l3", "task_type"]
+        if view_mode == "print":
+            st.caption(
+                "A4 가로 기준으로 자격증 8열 × 업무 40행씩 자동 분할됩니다. "
+                "미리보기 안의 ‘인쇄 / PDF 저장’ 버튼을 사용하세요."
+            )
+            print_html = build_mapping_print_html(
+                display_matrix,
+                bucket=bucket,
+                cert_meta=cert_meta,
+            )
+            components.html(print_html, height=900, scrolling=True)
+        else:
+            column_config = {
+                "work_code": st.column_config.TextColumn(
+                    "업무분류코드", disabled=True, pinned=True,
+                ),
+                "l1": st.column_config.TextColumn(
+                    "대", disabled=True, pinned=True, width="small",
+                ),
+                "l2": st.column_config.TextColumn(
+                    "중분류", disabled=True, pinned=True, width="small",
+                ),
+                "l3": st.column_config.TextColumn(
+                    "소분류", disabled=True, pinned=True, width="small",
+                ),
+                "task_type": st.column_config.TextColumn(
+                    "산정/검증", disabled=True, pinned=True, width="small",
+                ),
+            }
+            for cert_code in display_matrix.columns[5:]:
+                meta = cert_meta.get(cert_code, {})
+                name = meta.get("cert_name", cert_code)
+                holders = meta.get("holder_count", 0)
+                column_config[cert_code] = st.column_config.NumberColumn(
+                    f"{name} ({holders}명)",
+                    help=cert_code,
+                    min_value=1, max_value=5, step=1,
                 )
-                if sum(result.values()) == 0:
-                    st.toast(f"{bucket}: 변경 없음", icon="ℹ️")
-                else:
-                    st.toast(
-                        f"{bucket} 저장 — 추가 {result['inserted']} / "
-                        f"수정 {result['updated']} / 삭제 {result['deleted']}",
-                        icon="✅",
+
+            editor_key = f"matrix_ccat_{bucket}"
+            edited = st.data_editor(
+                display_matrix,
+                num_rows="fixed",
+                width="stretch",
+                hide_index=True,
+                key=editor_key,
+                column_config=column_config,
+                disabled=info_cols,
+            )
+
+            if st.button("이 분류 저장", type="primary"):
+                try:
+                    result = db.save_mapping_matrix_diff(
+                        display_matrix, edited, row_axis="work_code",
                     )
-                st.rerun()
-            except Exception as e:
-                st.error(f"저장 오류: {e}", icon="❌")
+                    if sum(result.values()) == 0:
+                        st.toast(f"{bucket}: 변경 없음", icon="ℹ️")
+                    else:
+                        st.toast(
+                            f"{bucket} 저장 — 추가 {result['inserted']} / "
+                            f"수정 {result['updated']} / 삭제 {result['deleted']}",
+                            icon="✅",
+                        )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"저장 오류: {e}", icon="❌")
 
     elif choice:
         st.subheader(TABLE_LABELS.get(choice, choice))
