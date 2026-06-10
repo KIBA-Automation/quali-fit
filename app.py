@@ -324,6 +324,7 @@ def _render_employee_org_chart(df: pd.DataFrame) -> None:
         components.html(html, height=min(1600, 320 + employee_count * 72), scrolling=True)
 
 st.set_page_config(page_title="quali-fit", layout="wide")
+db.init_db()
 
 # ============================================================
 # UI label translations (identifiers stay English, display 한글)
@@ -398,6 +399,8 @@ COLUMN_LABELS = {
     "owner":               "책임자",
     # education
     "education_id":        "학력번호",
+    "keco_major":          "고용직업분류 대분류",
+    "keco_minor":          "고용직업분류 중분류",
     "level":               "학력수준",
     "degree":              "학위",
     "school":              "학교명",
@@ -513,6 +516,50 @@ def render_cert_expiry_section(df: pd.DataFrame, today: date) -> None:
     )
     st.divider()
     st.caption("아래 표에서 편집 후 **저장**하세요.")
+
+
+def _render_education_summary(df: pd.DataFrame) -> None:
+    """Render education counts by level/degree and KECO major/minor."""
+    required = {"employee_id", "level", "degree", "keco_major", "keco_minor"}
+    if df.empty or not required.issubset(df.columns):
+        st.info("학력 집계를 만들 데이터가 아직 없습니다.")
+        return
+
+    has_keco_values = df[["keco_major", "keco_minor"]].notna().any().any()
+    work = df.copy()
+    work["level"] = work["level"].fillna("학력 미지정")
+    work["degree"] = work["degree"].fillna("학위 미지정")
+    work["keco_major"] = work["keco_major"].fillna("고용직업분류 미지정")
+    work["keco_minor"] = work["keco_minor"].fillna("중분류 미지정")
+
+    total_people = work["employee_id"].nunique()
+    level_degree_summary = (
+        work.groupby(["level", "degree"], dropna=False)["employee_id"]
+        .nunique()
+        .reset_index(name="인원")
+        .sort_values(["인원", "level", "degree"], ascending=[False, True, True], ignore_index=True)
+    )
+
+    keco_summary = (
+        work.groupby(["keco_major", "keco_minor", "level", "degree"], dropna=False)["employee_id"]
+        .nunique()
+        .reset_index(name="인원")
+        .sort_values(["keco_major", "keco_minor", "level", "degree"], ignore_index=True)
+    )
+
+    st.caption(f"전체 인원 {total_people}명 기준으로 학력수준 / 학위 및 고용직업분류를 집계했습니다.")
+    summary_cols = st.columns(3)
+    summary_cols[0].metric("전체 인원", f"{total_people}명")
+    summary_cols[1].metric("학력 조합 수", f"{len(level_degree_summary)}개")
+    summary_cols[2].metric("KECO 조합 수", f"{len(keco_summary)}개")
+
+    st.markdown("#### 학력수준 / 학위별 인원")
+    st.dataframe(level_degree_summary, hide_index=True, width="stretch")
+
+    st.markdown("#### 고용직업분류 대분류 / 중분류별 학력 인원")
+    if not has_keco_values:
+        st.info("고용직업분류 대분류와 중분류 값이 아직 없어, 아래 표는 '미지정' 기준으로 집계됩니다.")
+    st.dataframe(keco_summary, hide_index=True, width="stretch")
 
 
 # ============================================================
@@ -651,6 +698,12 @@ if mode == "manage":
         # 자격증 보유: 만료 주의 패널 + 색상 표시 + 상태 포함 CSV (편집은 아래 표).
         if choice == "employee_cert":
             render_cert_expiry_section(df, date.today())
+
+        if choice == "education":
+            st.divider()
+            st.subheader("학력 집계")
+            st.caption("학력수준, 학위, 고용직업분류 대분류/중분류 기준으로 인원 수를 요약합니다.")
+            _render_education_summary(df)
 
         editor_key = f"{choice}_editor"
         meta = db.table_meta(choice)
