@@ -1,5 +1,6 @@
 import os
 import re
+from html import escape
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -53,6 +54,274 @@ def _build_info() -> str:
     if built:
         parts.append(built)
     return " · ".join(parts)
+
+
+_TITLE_ORDER = [
+        "원장", "대표", "사장", "부사장", "부원장", "전무", "상무", "본부장",
+        "실장", "부장", "팀장", "차장", "과장", "대리", "주임", "사원", "위원",
+        "수석", "이사",
+]
+
+
+def _title_rank(title: str) -> int:
+        for idx, token in enumerate(_TITLE_ORDER):
+                if token in str(title):
+                        return idx
+        return len(_TITLE_ORDER)
+
+
+def _render_employee_org_chart(df: pd.DataFrame) -> None:
+        """Render a department-based org chart from the current employee table."""
+        if df.empty or not {"name", "dept", "title"}.issubset(df.columns):
+                st.info("조직도를 만들 직원 데이터가 아직 없습니다.")
+                return
+
+        chart_df = df[["employee_id", "name", "dept", "title"]].copy()
+        chart_df["dept"] = chart_df["dept"].fillna("부서 미지정")
+        chart_df["title"] = chart_df["title"].fillna("직책 미지정")
+        chart_df = chart_df.sort_values(
+                by=["dept", "title", "name"],
+                key=lambda col: col.map(_title_rank) if col.name == "title" else col.astype(str),
+                kind="stable",
+        )
+
+        dept_count = chart_df["dept"].nunique(dropna=False)
+        employee_count = len(chart_df)
+        dept_blocks = []
+
+        for dept, group in chart_df.groupby("dept", sort=False):
+                employees = []
+                for _, row in group.iterrows():
+                        employees.append(
+                                f"""
+                                <div class=\"org-employee\">
+                                    <div class=\"org-employee-name\">{escape(str(row['name']))}</div>
+                                    <div class=\"org-employee-meta\">
+                                        <span>{escape(str(row['title']))}</span>
+                                        <span>{escape(str(row['employee_id']))}</span>
+                                    </div>
+                                </div>
+                                """
+                        )
+
+                dept_blocks.append(
+                        f"""
+                        <section class=\"org-dept\">
+                            <div class=\"org-dept-header\">
+                                <div class=\"org-dept-name\">{escape(str(dept))}</div>
+                                <div class=\"org-dept-count\">{len(group)}명</div>
+                            </div>
+                            <div class=\"org-employee-list\">{''.join(employees)}</div>
+                        </section>
+                        """
+                )
+
+        html = f"""
+        <style>
+            .org-wrap {{
+                font-family: 'Noto Sans KR', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+                color: #1f2937;
+                padding: 8px 4px 0;
+            }}
+            .org-summary {{
+                background: linear-gradient(135deg, #f8fafc 0%, #eef6ff 100%);
+                border: 1px solid #dbe7f3;
+                border-radius: 22px;
+                padding: 20px 22px;
+                box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+            }}
+            .org-kicker {{
+                display: inline-block;
+                font-size: 12px;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                color: #2563eb;
+                background: rgba(37, 99, 235, 0.1);
+                border-radius: 999px;
+                padding: 5px 10px;
+                margin-bottom: 10px;
+            }}
+            .org-title {{
+                font-size: 28px;
+                font-weight: 800;
+                margin: 0;
+                line-height: 1.2;
+            }}
+            .org-desc {{
+                margin-top: 8px;
+                color: #475569;
+                font-size: 14px;
+            }}
+            .org-stats {{
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-top: 14px;
+            }}
+            .org-stat {{
+                background: rgba(255, 255, 255, 0.8);
+                border: 1px solid #dbe7f3;
+                color: #0f172a;
+                border-radius: 999px;
+                padding: 6px 12px;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+            .org-rail {{
+                position: relative;
+                margin: 18px 0 8px;
+                padding-left: 18px;
+            }}
+            .org-rail::before {{
+                content: '';
+                position: absolute;
+                left: 6px;
+                top: 0;
+                bottom: 0;
+                width: 2px;
+                background: linear-gradient(to bottom, #93c5fd, #cbd5e1);
+            }}
+            .org-root {{
+                position: relative;
+                background: #0f172a;
+                color: white;
+                border-radius: 18px;
+                padding: 14px 18px;
+                margin-left: 18px;
+                width: fit-content;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+            }}
+            .org-root::before {{
+                content: '';
+                position: absolute;
+                left: -18px;
+                top: 50%;
+                width: 18px;
+                height: 2px;
+                background: #93c5fd;
+            }}
+            .org-root-title {{
+                font-size: 15px;
+                font-weight: 800;
+            }}
+            .org-root-sub {{
+                margin-top: 3px;
+                font-size: 12px;
+                color: rgba(255, 255, 255, 0.72);
+            }}
+            .org-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                gap: 16px;
+                margin-top: 18px;
+            }}
+            .org-dept {{
+                position: relative;
+                background: white;
+                border: 1px solid #e5e7eb;
+                border-radius: 20px;
+                padding: 16px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+            }}
+            .org-dept::before {{
+                content: '';
+                position: absolute;
+                left: 18px;
+                top: -18px;
+                width: 2px;
+                height: 18px;
+                background: #93c5fd;
+            }}
+            .org-dept-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 12px;
+            }}
+            .org-dept-name {{
+                font-size: 18px;
+                font-weight: 800;
+                color: #0f172a;
+            }}
+            .org-dept-count {{
+                font-size: 12px;
+                font-weight: 700;
+                color: #1d4ed8;
+                background: #eff6ff;
+                border-radius: 999px;
+                padding: 4px 10px;
+                white-space: nowrap;
+            }}
+            .org-employee-list {{
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }}
+            .org-employee {{
+                position: relative;
+                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+                border: 1px solid #e5e7eb;
+                border-radius: 16px;
+                padding: 12px 14px 12px 16px;
+            }}
+            .org-employee::before {{
+                content: '';
+                position: absolute;
+                left: -16px;
+                top: 50%;
+                width: 16px;
+                height: 2px;
+                background: #cbd5e1;
+            }}
+            .org-employee-name {{
+                font-size: 16px;
+                font-weight: 800;
+                color: #111827;
+            }}
+            .org-employee-meta {{
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+                margin-top: 8px;
+            }}
+            .org-employee-meta span {{
+                display: inline-flex;
+                align-items: center;
+                border-radius: 999px;
+                padding: 4px 8px;
+                font-size: 12px;
+                font-weight: 700;
+                color: #334155;
+                background: #e2e8f0;
+            }}
+            .org-empty {{
+                padding: 16px 0 8px;
+                color: #475569;
+                font-size: 14px;
+            }}
+        </style>
+        <div class="org-wrap">
+            <div class="org-summary">
+                <div class="org-kicker">자동 갱신</div>
+                <div class="org-title">직원 기본정보 조직도</div>
+                <div class="org-desc">이 화면은 직원 기본정보 표를 기준으로 부서와 직책을 다시 읽어 그립니다. 저장하거나 DB를 직접 바꾸면 다음 렌더에서 반영됩니다.</div>
+                <div class="org-stats">
+                    <span class="org-stat">부서 {dept_count}개</span>
+                    <span class="org-stat">직원 {employee_count}명</span>
+                    <span class="org-stat">정렬 기준: 부서 → 직책 → 이름</span>
+                </div>
+            </div>
+            <div class="org-rail">
+                <div class="org-root">
+                    <div class="org-root-title">회사 조직</div>
+                    <div class="org-root-sub">직원 기본정보를 기반으로 생성</div>
+                </div>
+            </div>
+            <div class="org-grid">{''.join(dept_blocks)}</div>
+        </div>
+        """
+        components.html(html, height=min(1600, 320 + employee_count * 72), scrolling=True)
 
 st.set_page_config(page_title="quali-fit", layout="wide")
 
@@ -428,6 +697,12 @@ if mode == "manage":
                     st.rerun()
                 except Exception as e:
                     st.error(f"저장 오류: {e}", icon="❌")
+
+        if choice == "employee":
+            st.divider()
+            st.subheader("조직도")
+            st.caption("직원 기본정보의 이름, 부서, 직책을 기준으로 자동 생성됩니다.")
+            _render_employee_org_chart(df)
 
 # ============================================================
 # 직원 추천
