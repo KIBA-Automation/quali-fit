@@ -145,18 +145,5 @@ def build_mapping_workbook(certs, work_codes, influence) -> bytes:
                 else:
                     ws.write_number(row, col, v, f_num)
 
-        # --- influence color scale (light -> dark) for at-a-glance reading ---
-        if wcs and cert_list:
-            ws.conditional_format(
-                _DATA_ROW0, _FIRST_VAL_COL,
-                _DATA_ROW0 + len(cert_list) - 1, _FIRST_VAL_COL + len(wcs) - 1,
-                {
-                    "type": "3_color_scale",
-                    "min_type": "num", "min_value": 1, "min_color": "#FFFFFF",
-                    "mid_type": "num", "mid_value": 3, "mid_color": "#FFD27F",
-                    "max_type": "num", "max_value": 5, "max_color": "#F4795B",
-                },
-            )
-
     wb.close()
     return buf.getvalue()
