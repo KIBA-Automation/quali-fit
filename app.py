@@ -1,12 +1,13 @@
 import os
 import re
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import db
 import validation
 import scoring
 from print_view import build_mapping_print_html
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 
@@ -152,6 +153,100 @@ def _label(col: str) -> str:
 
 
 # ============================================================
+# 자격증 보유 — 만료 표시 (주의 패널 + 셀 배경색 + CSV)
+# ============================================================
+CERT_WARN_DAYS = 30  # 만료 임박 기준 (일)
+
+_CERT_STATUS_LABELS = {"expired": "만료", "expiring": "만료 예정"}
+_CERT_STATUS_COLORS = {"expired": "#ffcccc", "expiring": "#fff3b0"}
+
+
+def _parse_cert_date(value: str) -> date | None:
+    """employee_cert 날짜 문자열('YY.MM.DD' 등)을 date로 파싱. 실패 시 None."""
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    for fmt in ("%y.%m.%d", "%Y-%m-%d", "%Y.%m.%d", "%y-%m-%d", "%Y/%m/%d", "%y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _cert_expiry_status(expires_at: str, today: date,
+                        warn_days: int = CERT_WARN_DAYS) -> str:
+    """expires_at을 today 기준으로 'expired' / 'expiring' / '' 로 분류.
+
+    - 'expired'  : 유효기간이 오늘 이전(오늘 포함) → 만료
+    - 'expiring' : warn_days(기본 30일) 이내 만료 예정
+    - ''         : 여유 있음 / 날짜 미상
+    """
+    d = _parse_cert_date(expires_at)
+    if d is None:
+        return ""
+    if d <= today:
+        return "expired"
+    if (d - today).days <= warn_days:
+        return "expiring"
+    return ""
+
+
+def render_cert_expiry_section(df: pd.DataFrame, today: date) -> None:
+    """자격증 보유 화면 상단: 만료 주의 패널 + 색상 표시 표 + 상태 포함 CSV.
+
+    편집은 아래쪽 data_editor에서 그대로 하고, 이 영역은 만료 모니터링용
+    읽기 전용 뷰입니다(셀 배경색은 st.data_editor가 지원하지 않으므로 분리).
+    """
+    if df.empty or "expires_at" not in df.columns:
+        return
+    status = df["expires_at"].apply(lambda v: _cert_expiry_status(v, today))
+
+    # ---- 1. 주의 패널 ----
+    expiring = df[status == "expiring"]
+    expired = df[status == "expired"]
+    if expiring.empty and expired.empty:
+        st.success("만료되었거나 만료 예정인 자격증이 없습니다.")
+    else:
+        lines = ["**⚠️ 주의**"]
+        for _, r in expiring.iterrows():
+            lines.append(f"- {r['name']}, {r['cert_name']} 자격증 만료 예정")
+        for _, r in expired.iterrows():
+            lines.append(f"- {r['name']}, {r['cert_name']} 만료")
+        st.warning("\n".join(lines))
+
+    # ---- 2. 색상 표시 표 (읽기 전용) ----
+    view = df.copy()
+    view["status"] = status.map(_CERT_STATUS_LABELS).fillna("")
+
+    def _style_row(row):
+        color = _CERT_STATUS_COLORS.get(status.loc[row.name], "")
+        return [f"background-color: {color}" if color else ""] * len(row)
+
+    styled = view.style.apply(_style_row, axis=1)
+    st.caption(f"🔴 만료 · 🟡 {CERT_WARN_DAYS}일 이내 만료 예정")
+    column_config = {c: _label(c) for c in df.columns}
+    column_config["status"] = st.column_config.TextColumn("상태")
+    st.dataframe(styled, hide_index=True, width="stretch",
+                 column_config=column_config)
+
+    # ---- 3. CSV 다운로드 (상태 컬럼 포함 → 만료 정보 보존) ----
+    csv_headers = {c: _label(c) for c in view.columns}
+    csv_headers["status"] = "상태"
+    csv_df = view.rename(columns=csv_headers)
+    st.download_button(
+        "CSV 다운로드 (만료 상태 포함)",
+        data=csv_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="employee_cert_status.csv",
+        mime="text/csv",
+    )
+    st.divider()
+    st.caption("아래 표에서 편집 후 **저장**하세요.")
+
+
+# ============================================================
 # Top-level mode (sidebar — primary nav)
 # ============================================================
 MODES = list(MODE_LABELS.keys())
@@ -283,6 +378,11 @@ if mode == "manage":
         st.subheader(TABLE_LABELS.get(choice, choice))
         # ---- Generic CRUD (all other tables) ----
         df = db.fetch_all(choice)
+
+        # 자격증 보유: 만료 주의 패널 + 색상 표시 + 상태 포함 CSV (편집은 아래 표).
+        if choice == "employee_cert":
+            render_cert_expiry_section(df, date.today())
+
         editor_key = f"{choice}_editor"
         meta = db.table_meta(choice)
         fk_opts = db.fk_options(choice)
