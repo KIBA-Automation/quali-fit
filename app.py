@@ -12,12 +12,6 @@ from datetime import date, datetime
 from pathlib import Path
 
 
-def _l1_letter(l1: str) -> str:
-    """'원가(C)' -> 'C'; falls back to original string if no (X) parens."""
-    m = re.search(r"\(([A-Z])\)", l1)
-    return m.group(1) if m else l1
-
-
 REPO_URL = "https://github.com/bookseal/quali-fit"
 
 
@@ -352,16 +346,6 @@ CATEGORY_LABELS = {
     "employee_group": "직원",
     "work_group":     "업무분류",
     "cert_group":     "한국 자격증 목록",
-}
-
-# Cert l1_category -> bucket (UI-level grouping for the mapping matrix).
-# Each cert l1_category in cert_master should appear exactly once.
-CERT_BUCKETS: dict[str, list[str]] = {
-    "공통":         ["경영경제", "법률행정", "노무사회", "교육사무문화"],
-    "제조·공사":     ["공학제조", "건설부동산"],
-    "안전·환경·생명": ["안전환경", "농림생명"],
-    "IT·데이터":    ["IT데이터"],
-    "기타":         ["보건복지", "교통운송"],
 }
 
 COLUMN_LABELS = {
