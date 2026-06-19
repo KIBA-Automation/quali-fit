@@ -5,15 +5,13 @@
 시드 형식은 db.py 의 SEED_PLAN 과 1:1로 맞춘다(헤더명·FK 순서 동일).
 
 == 단계 ==
-이 스크립트는 1·2단계를 채운다:
-    01_직원.csv          ← '개인DB' 시트
-    02_자격증_마스터.csv  ← '자격증DB' 시트 (+ '자격증' 시트에만 있는 보유자격증 union)
-    04_직원_학력.csv      ← '학력' 시트
-    05_직원_자격증.csv    ← '자격증' 시트(취득/등록/유효기간) → 만료 모니터링
-나머지 2종은 seed_from_csv()가 6개 CSV를 한 번에 로드하므로 앱이 깨지지 않도록
-"헤더만 있는 빈 CSV"로 생성한다(3단계에서 채움):
-    03_업무코드_마스터.csv
-    06_업무코드_자격증_매핑.csv ← (3단계) CA~CG 카테고리 매핑
+이 스크립트는 6개 시드 CSV 를 모두 채운다(1·2·3단계 완료):
+    01_직원.csv               ← '개인DB' 시트
+    02_자격증_마스터.csv       ← '자격증DB' 시트 (+ '자격증' 시트에만 있는 보유자격증 union)
+    03_업무코드_마스터.csv      ← '업무별 코드분류표' 시트 (leaf 코드 = WORK-CA-111 ...)
+    04_직원_학력.csv           ← '학력' 시트
+    05_직원_자격증.csv         ← '자격증' 시트(취득/등록/유효기간) → 만료 모니터링
+    06_업무코드_자격증_매핑.csv ← 자격증 카테고리(CA-110 등)를 업무 leaf 로 전개 → 추천 점수화
 
 == 사용법 (repo 루트에서) ==
     SRC="/path/to/학력_자격증_26.05.14_v13.xlsm" python scripts/etl_xlsm_to_seeds.py
@@ -43,6 +41,11 @@ SHEET_PERSON = "개인DB"
 SHEET_CERT = "자격증DB"
 SHEET_EDU = "학력"
 SHEET_EMPCERT = "자격증"
+SHEET_WORK = "업무별 코드분류표"
+
+# 업무/카테고리 코드 패턴 (예: CA-110, WORK-CA-111 의 접두 제외부)
+CODE_RE = re.compile(r"^[A-Z]{2}-\d{3}$")
+WORK_PREFIX = "WORK-"   # work_code PK 관례 (issue #28, export.py 가 표시 때 strip)
 
 # --- SEED_PLAN 과 동일한 CSV 헤더 (순서 포함) ---
 H_EMPLOYEE = ["직원번호", "이름", "소속", "직책"]
@@ -111,8 +114,12 @@ def load_employees(ws):
 
 
 def load_certs(ws):
-    """자격증DB → cert_master 행 + 자격증명→코드 매핑. (헤더 2줄, 데이터 3행~)"""
-    rows, name_to_code, dups = [], {}, []
+    """자격증DB → cert_master 행 + 자격증명→코드 매핑 + 코드→카테고리그룹코드.
+
+    (헤더 2줄, 데이터 3행~)  카테고리 그룹코드(CA-110 등)는 KEY(col8)와
+    제조(CA)~갈등조정(col9~17) 셀에서 모은다 → 3단계 work_code_cert_map 용.
+    """
+    rows, name_to_code, dups, categories = [], {}, [], {}
     n = 0
     for r in ws.iter_rows(min_row=3, values_only=True):
         cert_name = s(r[1])     # B: 자격증명
@@ -134,11 +141,15 @@ def load_certs(ws):
             license_type, evidence, "", "",  # 자격유형/증빙유형/자격등급구분/키워드
             ministry, issuer,
         ])
+        # 카테고리 그룹코드 수집(KEY + CA~CG 등 col8~17)
+        groups = {g for g in (s(r[c]) for c in range(8, 18) if c < len(r))
+                  if CODE_RE.match(g)}
         if cert_name in name_to_code:
             dups.append(cert_name)
         else:
             name_to_code[cert_name] = code
-    return rows, name_to_code, dups
+            categories[code] = groups
+    return rows, name_to_code, dups, categories
 
 
 def load_education(ws, name_to_id):
@@ -211,6 +222,79 @@ def load_employee_certs(ws, name_to_id, cert_rows, name_to_code):
     return rows, miss_name, dups, added
 
 
+def load_work_codes(ws):
+    """업무별 코드분류표 → work_code_master 행 + 그룹코드→leaf work_code 매핑.
+
+    4단계 계층(병합셀): col0 대분류 / col1 카테고리(제조(CA)) / col2 중분류 /
+    col3 세부분류 / col4 그룹코드(CA-110) / col5 산정·검증명 / col6 leaf코드(CA-111).
+    leaf(col6)마다 한 행. work_code = 'WORK-'+leaf. task_type 은 산정/검증.
+    그룹코드(col4)→[leaf work_code...] 매핑은 자격증 카테고리 전개에 쓴다.
+    (헤더 row4, 데이터 row5~. 병합셀은 forward-fill)
+    """
+    FILL = [0, 1, 2, 3, 4, 7, 8, 9, 10, 11]   # 병합되어 비는 컬럼 (forward-fill 대상)
+    last = {}
+    rows, group_to_leaves, bad = [], {}, []
+    for r in ws.iter_rows(min_row=5, values_only=True):
+        for c in FILL:
+            v = s(r[c]) if c < len(r) else ""
+            if v:
+                last[c] = v
+        leaf = s(r[6]) if len(r) > 6 else ""
+        if not CODE_RE.match(leaf):
+            continue
+        c5 = s(r[5]) if len(r) > 5 else ""
+        if "산정" in c5:
+            task = "산정"
+        elif "검증" in c5:
+            task = "검증"
+        else:                                  # 폴백: leaf 끝자리 홀=산정/짝=검증
+            task = "산정" if int(leaf[-1]) % 2 else "검증"
+        work_code = WORK_PREFIX + leaf
+        rows.append([
+            work_code,
+            last.get(0, ""),                   # 대분류 → l1
+            last.get(2, ""),                   # 중분류 → l2
+            last.get(3, ""),                   # 세부분류 → l3(소분류)
+            task,                              # 업무구분 (산정/검증)
+            last.get(7, ""),                   # 분류 기준
+            last.get(8, ""),                   # 관리부서
+            last.get(9, ""),                   # 책임자
+            "",                                # 적용된키워드 (원천 없음)
+            "",                                # 분류근거및설명 (원천 없음)
+            last.get(10, ""),                  # 관련지침
+            last.get(11, ""),                  # 관련법령
+        ])
+        group = last.get(4, "")
+        if CODE_RE.match(group):
+            group_to_leaves.setdefault(group, []).append(work_code)
+        else:
+            bad.append(leaf)
+    return rows, group_to_leaves, bad
+
+
+def load_work_cert_map(cert_rows, cert_categories, group_to_leaves):
+    """자격증 카테고리 그룹코드를 leaf work_code 로 전개해 work_code_cert_map 생성.
+
+    cert 의 카테고리(CA-110 등) → 그 그룹의 leaf(산정·검증 둘 다) 로 펼친다.
+    influence 는 해당 cert 의 영향력(cert_master)을 사용. 복합 PK(work,cert) 중복 제거.
+    """
+    influence_of = {row[0]: row[7] for row in cert_rows}   # cert_code → 영향력
+    rows, seen, unmapped = [], set(), set()
+    for cert_code, groups in cert_categories.items():
+        for g in groups:
+            leaves = group_to_leaves.get(g)
+            if not leaves:
+                unmapped.add(g)
+                continue
+            for work_code in leaves:
+                key = (work_code, cert_code)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append([work_code, cert_code, influence_of.get(cert_code, "3")])
+    return rows, sorted(unmapped)
+
+
 def main() -> None:
     src = os.environ.get("SRC") or (sys.argv[1] if len(sys.argv) > 1 else "")
     if not src:
@@ -221,31 +305,33 @@ def main() -> None:
 
     print(f"읽는 중: {src_path}")
     wb = openpyxl.load_workbook(src_path, data_only=True, read_only=True)
-    for need in (SHEET_PERSON, SHEET_CERT, SHEET_EDU, SHEET_EMPCERT):
+    for need in (SHEET_PERSON, SHEET_CERT, SHEET_EDU, SHEET_EMPCERT, SHEET_WORK):
         if need not in wb.sheetnames:
             sys.exit(f"필요한 시트가 없습니다: {need!r} (있는 시트: {wb.sheetnames})")
 
     emp_rows, name_to_id, emp_dups = load_employees(wb[SHEET_PERSON])
-    cert_rows, cert_map, cert_dups = load_certs(wb[SHEET_CERT])
+    cert_rows, cert_map, cert_dups, cert_categories = load_certs(wb[SHEET_CERT])
     # 보유자격증 처리 시 cert_rows/cert_map 에 catalog 누락분이 union 으로 추가됨 → 02 보다 먼저 실행
     ec_rows, ec_miss, ec_dups, ec_added = load_employee_certs(
         wb[SHEET_EMPCERT], name_to_id, cert_rows, cert_map)
     edu_rows, edu_missing = load_education(wb[SHEET_EDU], name_to_id)
+    work_rows, group_to_leaves, work_bad = load_work_codes(wb[SHEET_WORK])
+    map_rows, map_unmapped = load_work_cert_map(cert_rows, cert_categories, group_to_leaves)
 
     print("\n시드 CSV 생성 (Data/):")
     write_csv("01_직원.csv", H_EMPLOYEE, emp_rows)
     write_csv("02_자격증_마스터.csv", H_CERT, cert_rows)   # 자격증DB + 보유자격증 union
+    write_csv("03_업무코드_마스터.csv", H_WORK, work_rows)
     write_csv("04_직원_학력.csv", H_EDU, edu_rows)
     write_csv("05_직원_자격증.csv", H_EMP_CERT, ec_rows)
-    # --- 3단계용 빈 스텁(헤더만) — seed_from_csv() 가 6종을 모두 로드하므로 필요 ---
-    write_csv("03_업무코드_마스터.csv", H_WORK, [])
-    write_csv("06_업무코드_자격증_매핑.csv", H_MAP, [])
+    write_csv("06_업무코드_자격증_매핑.csv", H_MAP, map_rows)
 
     # --- 경고/리포트 ---
     print("\n요약:")
     print(f"  직원 {len(emp_rows)}명 · 자격증마스터 {len(cert_rows)}종"
           f"(보유 union +{len(ec_added)}) · 학력 {len(edu_rows)}건"
           f" · 보유자격증 {len(ec_rows)}건")
+    print(f"  업무코드 {len(work_rows)}개(그룹 {len(group_to_leaves)}) · 업무–자격증 매핑 {len(map_rows)}건")
     if emp_dups:
         print(f"  [경고] 개인DB 동명이인(첫 항목만 매핑됨): {sorted(set(emp_dups))}")
     if cert_dups:
@@ -258,6 +344,10 @@ def main() -> None:
         print(f"  [경고] 보유자격증 {len(ec_miss)}건이 개인DB에 없는 이름 → 제외: {sorted(set(ec_miss))}")
     if ec_dups:
         print(f"  [경고] (직원,자격증) 중복 {len(ec_dups)}건 → 첫 건만: {ec_dups[:10]}")
+    if work_bad:
+        print(f"  [경고] 그룹코드 없는 leaf {len(work_bad)}개: {work_bad[:10]}")
+    if map_unmapped:
+        print(f"  [경고] 업무표에 없는 자격증 카테고리코드 {len(map_unmapped)}: {map_unmapped}")
     print("\n다음: repo 루트에서  python -c \"import db; db.seed_from_csv()\"  로 적재")
 
 
