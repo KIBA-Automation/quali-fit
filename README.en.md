@@ -58,6 +58,17 @@ what weight, with expiry checked).
   category. Mode and selection both live in the URL (`?mode=…&cat=…&svc=…`
   or `?mode=recommend&wc=…`) so refresh keeps you on the same screen.
 
+## How it works
+
+```mermaid
+flowchart LR
+  T[Select work code] --> M[Required certs]
+  M --> S[Score = influence × validity]
+  S --> R[Rank employees]
+  R --> W[Top-3 with reasons]
+  S -. expired cert → 0 .-> R
+```
+
 ## Stack
 
 | Layer | Choice |
